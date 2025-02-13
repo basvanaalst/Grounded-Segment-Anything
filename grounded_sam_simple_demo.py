@@ -6,7 +6,7 @@ import torch
 import torchvision
 
 from groundingdino.util.inference import Model
-from segment_anything import sam_model_registry, SamPredictor
+from segment_anything.segment_anything import sam_model_registry, SamPredictor
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
