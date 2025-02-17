@@ -1,87 +1,90 @@
+# Download pre-trained weights for GroundingDINO after cd Grounded-Segment-Anything
+# wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
+
+# Download weights for SAM
+#! curl https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth -o sam_vit_h_4b8939.pth
+
+# Install GroundingDINO, SAM and all other dependencies
 #! python -m pip install -e segment_anything
 #! python -m pip install -e GroundingDINO
+
+# Optional for diffusion model and LLM stuff, might need one of these for the installation to work
 #! pip install diffusers transformers accelerate scipy safetensors
 
-import os, sys
-sys.path.append(os.path.join(os.getcwd(), "GroundingDINO"))
-
-# If you have multiple GPUs, you can set the GPU to use here.
-# The default is to use the first GPU, which is usually GPU 0.
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
-import argparse
 import os
 import numpy as np
 import torch
-from PIL import Image, ImageDraw, ImageFont
-from torchvision.ops import box_convert
+import cv2
+from PIL import Image
+import torch
 
-# Grounding DINO
-import GroundingDINO.groundingdino.datasets.transforms as T
-from GroundingDINO.groundingdino.models import build_model
 from GroundingDINO.groundingdino.util import box_ops
-from GroundingDINO.groundingdino.util.slconfig import SLConfig
-from GroundingDINO.groundingdino.util.utils import clean_state_dict, get_phrases_from_posmap
-from GroundingDINO.groundingdino.util.inference import annotate, load_image, predict
+from GroundingDINO.groundingdino.util.inference import load_model, annotate, load_image, predict
+from segment_anything.segment_anything import SamPredictor, build_sam
 
-# segment anything
-from segment_anything.segment_anything import build_sam, SamPredictor 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-from huggingface_hub import hf_hub_download
+# GroundingDINO config and checkpoint
+GROUNDING_DINO_CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+GROUNDING_DINO_CHECKPOINT_PATH = "./groundingdino_swint_ogc.pth"
 
-def load_model_hf(repo_id, filename, ckpt_config_filename, device='cpu'):
-    cache_config_file = hf_hub_download(repo_id=repo_id, filename=ckpt_config_filename)
+# Segment-Anything checkpoint
+SAM_CHECKPOINT_PATH = "./sam_vit_h_4b8939.pth"
 
-    args = SLConfig.fromfile(cache_config_file) 
-    model = build_model(args)
-    args.device = device
+# Building GroundingDINO inference model
+groundingdino_model = load_model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH)
+groundingdino_model = groundingdino_model.to(DEVICE)
 
-    cache_file = hf_hub_download(repo_id=repo_id, filename=filename)
-    checkpoint = torch.load(cache_file, map_location='cpu')
-    log = model.load_state_dict(clean_state_dict(checkpoint['model']), strict=False)
-    print("Model loaded from {} \n => {}".format(cache_file, log))
-    _ = model.eval()
-    return model   
+print("dino done")
 
-print("start_groundingDINO")
-ckpt_repo_id = "ShilongLiu/GroundingDINO"
-ckpt_filenmae = "groundingdino_swinb_cogcoor.pth"
-ckpt_config_filename = "GroundingDINO_SwinB.cfg.py"
-groundingdino_model = load_model_hf(ckpt_repo_id, ckpt_filenmae, ckpt_config_filename)
-
-#! curl https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth -o sam_vit_h_4b8939.pth
-
-DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-print("start_SAM")
-sam_checkpoint = 'sam_vit_h_4b8939.pth'
-sam = build_sam(checkpoint=sam_checkpoint)
+# Building SAM Model and SAM Predictor
+sam = build_sam(checkpoint=SAM_CHECKPOINT_PATH)
 sam.to(device=DEVICE)
 sam_predictor = SamPredictor(sam)
+
+print("sam done")
 
 #semantic segmentation for all files in images folder
 for file in os.listdir("images"):
     if file.endswith(".jpg"):
-        print("image")
-        TEXT_PROMPT = "plants"
-        BOX_TRESHOLD = 0.30
-        TEXT_TRESHOLD = 0.25
+        TEXT_PROMPT = ["plants"]
+        BOX_THRESHOLD = 0.25
+        TEXT_THRESHOLD = 0.25
+        NMS_THRESHOLD = 0.8
 
-        image_source, image = load_image(file)
+        input_path = os.path.join("images", file)
+        output_dir = "images_results"
+        img = cv2.imread(input_path)
+
+        image_source, image = load_image(img)
 
         boxes, logits, phrases = predict(
             model=groundingdino_model, 
             image=image, 
             caption=TEXT_PROMPT, 
-            box_threshold=BOX_TRESHOLD, 
-            text_threshold=TEXT_TRESHOLD,
+            box_threshold=BOX_THRESHOLD, 
+            text_threshold=TEXT_THRESHOLD,
             device=DEVICE
         )
 
         annotated_frame = annotate(image_source=image_source, boxes=boxes, logits=logits, phrases=phrases)
         annotated_frame = annotated_frame[...,::-1] # BGR to RGB
 
-        sam_predictor.set_image(image_source)
+        # NMS post process
+        #print(f"Before NMS: {len(detections.xyxy)} boxes")
+        #nms_idx = torchvision.ops.nms(
+        #    torch.from_numpy(detections.xyxy), 
+        #    torch.from_numpy(detections.confidence), 
+        #    NMS_THRESHOLD
+        #).numpy().tolist()
+
+        #detections.xyxy = detections.xyxy[nms_idx]
+        #detections.confidence = detections.confidence[nms_idx]
+        #detections.class_id = detections.class_id[nms_idx]
+
+        #print(f"After NMS: {len(detections.xyxy)} boxes")
+
+        sam_predictor.set_image(image)
 
         # box: normalized box xywh -> unnormalized xyxy
         H, W, _ = image_source.shape
@@ -89,11 +92,11 @@ for file in os.listdir("images"):
 
         transformed_boxes = sam_predictor.transform.apply_boxes_torch(boxes_xyxy, image_source.shape[:2]).to(DEVICE)
         masks, _, _ = sam_predictor.predict_torch(
-                    point_coords = None,
-                    point_labels = None,
-                    boxes = transformed_boxes,
-                    multimask_output = False,
-                )
+            point_coords = None,
+            point_labels = None,
+            boxes = transformed_boxes,
+            multimask_output = False,
+        )
 
         def show_masks(masks, image, random_color=True):
             annotated_frame_pil = Image.fromarray(image).convert("RGBA")
@@ -135,5 +138,6 @@ for file in os.listdir("images"):
             filename = f"{category}_{file}.png"
             output_path = os.path.join("images_results", filename)
             image.save(output_path)
+            print(f"Saved {output_path}")    
 
 
