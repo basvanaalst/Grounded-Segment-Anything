@@ -31,6 +31,9 @@ GROUNDING_DINO_CHECKPOINT_PATH = "./groundingdino_swint_ogc.pth"
 # Segment-Anything checkpoint
 SAM_CHECKPOINT_PATH = "./sam_vit_h_4b8939.pth"
 
+input_dir = "images"
+output_dir = "images_results"
+
 # Building GroundingDINO inference model
 groundingdino_model = load_model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH)
 groundingdino_model = groundingdino_model.to(DEVICE)
@@ -38,25 +41,28 @@ groundingdino_model = groundingdino_model.to(DEVICE)
 print("dino done")
 
 # Building SAM Model and SAM Predictor
-sam = build_sam(checkpoint=SAM_CHECKPOINT_PATH)
-sam.to(device=DEVICE)
-sam_predictor = SamPredictor(sam)
+try:
+    sam = build_sam(checkpoint=SAM_CHECKPOINT_PATH)
+    print("Model built successfully")
+    sam.to(device=DEVICE)
+    print("Model moved to device")
+    sam_predictor = SamPredictor(sam)
+    print("SamPredictor initialized")
+except Exception as e:
+    print(f"Error: {e}")
 
 print("sam done")
 
 #semantic segmentation for all files in images folder
-for file in os.listdir("images"):
-    if file.endswith(".jpg"):
-        TEXT_PROMPT = ["plants"]
+for file in os.listdir(input_dir):
+    if file.lower().endswith(".jpg"):
+        TEXT_PROMPT = "plants"
         BOX_THRESHOLD = 0.25
         TEXT_THRESHOLD = 0.25
         NMS_THRESHOLD = 0.8
 
-        input_path = os.path.join("images", file)
-        output_dir = "images_results"
-        img = cv2.imread(input_path)
-
-        image_source, image = load_image(img)
+        input_path = os.path.join(input_dir, file)
+        image_source, image = load_image(input_path)
 
         boxes, logits, phrases = predict(
             model=groundingdino_model, 
@@ -84,7 +90,7 @@ for file in os.listdir("images"):
 
         #print(f"After NMS: {len(detections.xyxy)} boxes")
 
-        sam_predictor.set_image(image)
+        sam_predictor.set_image(image_source)
 
         # box: normalized box xywh -> unnormalized xyxy
         H, W, _ = image_source.shape
@@ -135,8 +141,9 @@ for file in os.listdir("images"):
 
         result_images = [(image_mask_pil, "mask"), (annotated_frame_pil, "annotated_frame"), (result_image, "result")]
         for _, (image, category) in enumerate(result_images):
-            filename = f"{category}_{file}.png"
-            output_path = os.path.join("images_results", filename)
+            file_without_ext = os.path.splitext(file)[0]
+            filename = f"{category}_{file_without_ext}.png"
+            output_path = os.path.join(output_dir, filename)
             image.save(output_path)
             print(f"Saved {output_path}")    
 
