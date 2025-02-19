@@ -28,22 +28,20 @@ from segment_anything_hq import sam_model_registry, SamPredictor
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# GroundingDINO config and checkpoint
 GROUNDING_DINO_CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
 GROUNDING_DINO_CHECKPOINT_PATH = "./groundingdino_swint_ogc.pth"
 
-# Segment-Anything checkpoint
 SAM_CHECKPOINT_PATH = "./sam_vit_h_4b8939.pth"
 
 input_dir = "images"
 output_dir = "images_results_hq"
 
-# Building GroundingDINO inference model
+# Building GroundingDINO
 groundingdino_model = Model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH, device=DEVICE)
 
 print("dino done")
 
-# Building SAM predictor
+# Building SAM
 light_hqsam = sam_model_registry["vit_h"](checkpoint=SAM_CHECKPOINT_PATH)
 light_hqsam.to(DEVICE)
 sam_predictor = SamPredictor(light_hqsam)
@@ -61,7 +59,6 @@ for file in os.listdir(input_dir):
         input_path = os.path.join(input_dir, file)
         image = cv2.imread(input_path)
 
-        # detect objects
         detections = groundingdino_model.predict_with_classes(
             image=image,
             classes=CLASSES,
@@ -83,7 +80,6 @@ for file in os.listdir(input_dir):
 
         print(f"After NMS: {len(detections.xyxy)} boxes")
 
-        # Prompting SAM with detected boxes
         def segment(sam_predictor: SamPredictor, image: np.ndarray, xyxy: np.ndarray) -> np.ndarray:
             sam_predictor.set_image(image)
             result_masks = []
@@ -96,14 +92,14 @@ for file in os.listdir(input_dir):
                 result_masks.append(masks[index])
             return np.array(result_masks)
 
-        # convert detections to masks
         detections.mask = segment(
             sam_predictor=sam_predictor,
             image=cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
             xyxy=detections.xyxy
         )
 
-        # annotate image with detections
+        # change color of masks!
+
         box_annotator = sv.BoundingBoxAnnotator()
         label_annotator = sv.LabelAnnotator()
         mask_annotator = sv.MaskAnnotator()
@@ -111,26 +107,22 @@ for file in os.listdir(input_dir):
             f"{CLASSES[class_id]} {confidence:0.2f}" 
             for _, _, confidence, class_id, _, _ 
             in detections]
-        annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
+        annotated_image = box_annotator.annotate(scene=image.copy(), detections=detections)
         annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
-        annotated_image = mask_annotator.annotate(scene=image.copy(), detections=detections)
+        annotated_image = mask_annotator.annotate(scene=annotated_image, detections=detections)
        
         mask_arrays = [detections.mask[i] for i in range(len(detections.mask))]
         combined_mask = np.stack(mask_arrays, axis=0)
         final_mask = np.max(combined_mask, axis=0) 
         mask_image = (final_mask * 255).astype(np.uint8)
 
-        # Ensure image and annotated_image are in the correct format
         image_source = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA) if image.shape[2] == 3 else image.copy()
         annotated_frame = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2BGRA) if annotated_image.shape[2] == 3 else annotated_image.copy()
 
-        # Apply mask to the alpha channel of the original image
         result_image = image_source.copy()
         result_image[:, :, 3] = mask_image
 
-        # Save images
         result_images = [(mask_image, "mask"), (annotated_frame, "annotated_frame"), (result_image, "result")]
-
         for image, category in result_images:
             file_without_ext = os.path.splitext(file)[0]
             filename = f"{category}_{file_without_ext}.png"

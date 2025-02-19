@@ -15,35 +15,33 @@ import os
 import numpy as np
 import torch
 import cv2
-from PIL import Image
+
 import torch
+import supervision as sv
+import torchvision
 
 from GroundingDINO.groundingdino.util import box_ops
-from GroundingDINO.groundingdino.util.inference import load_model, annotate, load_image, predict
-from segment_anything.segment_anything import SamPredictor, sam_model_registry
+from GroundingDINO.groundingdino.util.inference import Model
+from segment_anything.segment_anything import sam_model_registry, SamPredictor
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# GroundingDINO config and checkpoint
 GROUNDING_DINO_CONFIG_PATH = "GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
 GROUNDING_DINO_CHECKPOINT_PATH = "./groundingdino_swint_ogc.pth"
 
-# Segment-Anything checkpoint
 SAM_CHECKPOINT_PATH = "./sam_vit_h_4b8939.pth"
 
 input_dir = "images"
 output_dir = "images_results"
 
-# Building GroundingDINO inference model
-groundingdino_model = load_model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH)
-groundingdino_model = groundingdino_model.to(DEVICE)
+# Building GroundingDINO
+groundingdino_model = Model(model_config_path=GROUNDING_DINO_CONFIG_PATH, model_checkpoint_path=GROUNDING_DINO_CHECKPOINT_PATH, device=DEVICE)
 
 print("dino done")
 
-# Building SAM Model and SAM Predictor
-
+# Building SAM
 sam = sam_model_registry["vit_h"](checkpoint=SAM_CHECKPOINT_PATH)
-sam.to(device=DEVICE)
+sam.to(DEVICE)
 sam_predictor = SamPredictor(sam)
 
 print("sam done")
@@ -51,95 +49,82 @@ print("sam done")
 #semantic segmentation for all files in images folder
 for file in os.listdir(input_dir):
     if file.lower().endswith(".jpg"):
-        TEXT_PROMPT = "plants"
+        CLASSES = ["plants"]
         BOX_THRESHOLD = 0.25
         TEXT_THRESHOLD = 0.25
         NMS_THRESHOLD = 0.8
 
         input_path = os.path.join(input_dir, file)
-        image_source, image = load_image(input_path)
+        image = cv2.imread(input_path)
 
-        boxes, logits, phrases = predict(
-            model=groundingdino_model, 
-            image=image, 
-            caption=TEXT_PROMPT, 
-            box_threshold=BOX_THRESHOLD, 
-            text_threshold=TEXT_THRESHOLD,
-            device=DEVICE
+        detections = groundingdino_model.predict_with_classes(
+            image=image,
+            classes=CLASSES,
+            box_threshold=BOX_THRESHOLD,
+            text_threshold=TEXT_THRESHOLD
         )
-
-        annotated_frame = annotate(image_source=image_source, boxes=boxes, logits=logits, phrases=phrases)
-        annotated_frame = annotated_frame[...,::-1] # BGR to RGB
 
         # NMS post process
-        #print(f"Before NMS: {len(detections.xyxy)} boxes")
-        #nms_idx = torchvision.ops.nms(
-        #    torch.from_numpy(detections.xyxy), 
-        #    torch.from_numpy(detections.confidence), 
-        #    NMS_THRESHOLD
-        #).numpy().tolist()
+        print(f"Before NMS: {len(detections.xyxy)} boxes")
+        nms_idx = torchvision.ops.nms(
+            torch.from_numpy(detections.xyxy), 
+            torch.from_numpy(detections.confidence), 
+            NMS_THRESHOLD
+        ).numpy().tolist()
 
-        #detections.xyxy = detections.xyxy[nms_idx]
-        #detections.confidence = detections.confidence[nms_idx]
-        #detections.class_id = detections.class_id[nms_idx]
+        detections.xyxy = detections.xyxy[nms_idx]
+        detections.confidence = detections.confidence[nms_idx]
+        detections.class_id = detections.class_id[nms_idx]
 
-        #print(f"After NMS: {len(detections.xyxy)} boxes")
+        print(f"After NMS: {len(detections.xyxy)} boxes")
 
-        sam_predictor.set_image(image_source)
+        def segment(sam_predictor: SamPredictor, image: np.ndarray, xyxy: np.ndarray) -> np.ndarray:
+            sam_predictor.set_image(image)
+            result_masks = []
+            for box in xyxy:
+                masks, scores, _ = sam_predictor.predict(
+                    box=box,
+                    multimask_output=True
+                )
+                index = np.argmax(scores)
+                result_masks.append(masks[index])
+            return np.array(result_masks)
 
-        # box: normalized box xywh -> unnormalized xyxy
-        H, W, _ = image_source.shape
-        boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes) * torch.Tensor([W, H, W, H])
-
-        transformed_boxes = sam_predictor.transform.apply_boxes_torch(boxes_xyxy, image_source.shape[:2]).to(DEVICE)
-        masks, _, _ = sam_predictor.predict_torch(
-            point_coords = None,
-            point_labels = None,
-            boxes = transformed_boxes,
-            multimask_output = False,
+        detections.mask = segment(
+            sam_predictor=sam_predictor,
+            image=cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+            xyxy=detections.xyxy
         )
 
-        def show_masks(masks, image, random_color=True):
-            annotated_frame_pil = Image.fromarray(image).convert("RGBA")
+        # change color of masks!
 
-            for mask in masks:
-                if random_color:
-                    color = np.concatenate([np.random.random(3), np.array([0.8])], axis=0)
-                else:
-                    color = np.array([30/255, 144/255, 255/255, 0.6])
+        box_annotator = sv.BoundingBoxAnnotator()
+        label_annotator = sv.LabelAnnotator()
+        mask_annotator = sv.MaskAnnotator()
+        labels = [
+            f"{CLASSES[class_id]} {confidence:0.2f}" 
+            for _, _, confidence, class_id, _, _ 
+            in detections]
+        annotated_image = box_annotator.annotate(scene=image.copy(), detections=detections)
+        annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
+        annotated_image = mask_annotator.annotate(scene=annotated_image, detections=detections)
+       
+        mask_arrays = [detections.mask[i] for i in range(len(detections.mask))]
+        combined_mask = np.stack(mask_arrays, axis=0)
+        final_mask = np.max(combined_mask, axis=0) 
+        mask_image = (final_mask * 255).astype(np.uint8)
 
-                h, w = mask.shape[-2:]
-                mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-                mask_image_pil = Image.fromarray((mask_image.cpu().numpy() * 255).astype(np.uint8)).convert("RGBA")
-                annotated_frame_pil = Image.alpha_composite(annotated_frame_pil, mask_image_pil)
+        image_source = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA) if image.shape[2] == 3 else image.copy()
+        annotated_frame = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2BGRA) if annotated_image.shape[2] == 3 else annotated_image.copy()
 
-            return np.array(annotated_frame_pil)
+        result_image = image_source.copy()
+        result_image[:, :, 3] = mask_image
 
-        annotated_frame_result = show_masks(masks, annotated_frame)
-
-        # Assuming masks is a list or a tensor-like structure where masks[i][0] is a 2D mask
-        mask_arrays = [masks[i][0].cpu().numpy() for i in range(len(masks))]
-
-        # Stack masks into a single array (e.g., along the depth axis)
-        combined_mask = np.stack(mask_arrays, axis=0)  # Shape: (num_masks, height, width)
-
-        # Optionally, sum the masks or apply any other operation (e.g., max to avoid overlap intensity)
-        final_mask = np.max(combined_mask, axis=0)  # This takes the maximum value at each pixel
-
-        image_source_pil = Image.fromarray(image_source)
-        annotated_frame_pil = Image.fromarray(annotated_frame_result)
-        image_mask_pil = Image.fromarray((final_mask * 255).astype(np.uint8))
-
-        original_array = np.array(image_source_pil.convert("RGBA"))
-        original_array[:, :, 3] = image_mask_pil
-        result_image = Image.fromarray(original_array)
-
-        result_images = [(image_mask_pil, "mask"), (annotated_frame_pil, "annotated_frame"), (result_image, "result")]
-        for _, (image, category) in enumerate(result_images):
+        result_images = [(mask_image, "mask"), (annotated_frame, "annotated_frame"), (result_image, "result")]
+        for image, category in result_images:
             file_without_ext = os.path.splitext(file)[0]
             filename = f"{category}_{file_without_ext}.png"
             output_path = os.path.join(output_dir, filename)
-            image.save(output_path)
-            print(f"Saved {output_path}")    
-
+            cv2.imwrite(output_path, image)
+            print(f"Saved {output_path}")
 
