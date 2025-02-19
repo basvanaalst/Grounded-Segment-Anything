@@ -100,7 +100,7 @@ for file in os.listdir(input_dir):
 
         box_annotator = sv.BoundingBoxAnnotator()
         label_annotator = sv.LabelAnnotator()
-        mask_annotator = sv.MaskAnnotator()
+        mask_annotator = sv.MaskAnnotator(color=sv.ColorPalette.DEFAULT)
         labels = [
             f"{CLASSES[class_id]} {confidence:0.2f}" 
             for _, _, confidence, class_id, _, _ 

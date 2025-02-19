@@ -134,5 +134,6 @@ outputs/
 
 .idea/
 
-# output images
+# input/output images
 *.png
+*.jpg
