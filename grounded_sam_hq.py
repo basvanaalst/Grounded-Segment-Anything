@@ -69,14 +69,6 @@ for file in os.listdir(input_dir):
             text_threshold=TEXT_THRESHOLD
         )
 
-        # annotate image with detections
-        box_annotator = sv.BoxAnnotator()
-        labels = [
-            f"{CLASSES[class_id]} {confidence:0.2f}" 
-            for _, _, confidence, class_id, _, _ 
-            in detections]
-        annotated_frame = box_annotator.annotate(scene=image.copy(), detections=detections, labels=labels)
-
         # NMS post process
         print(f"Before NMS: {len(detections.xyxy)} boxes")
         nms_idx = torchvision.ops.nms(
@@ -104,7 +96,6 @@ for file in os.listdir(input_dir):
                 result_masks.append(masks[index])
             return np.array(result_masks)
 
-
         # convert detections to masks
         detections.mask = segment(
             sam_predictor=sam_predictor,
@@ -113,17 +104,21 @@ for file in os.listdir(input_dir):
         )
 
         # annotate image with detections
-        box_annotator = sv.BoxAnnotator()
+        box_annotator = sv.BoundingBoxAnnotator()
+        label_annotator = sv.LabelAnnotator()
         mask_annotator = sv.MaskAnnotator()
         labels = [
             f"{CLASSES[class_id]} {confidence:0.2f}" 
             for _, _, confidence, class_id, _, _ 
             in detections]
+        annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
+        annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
         annotated_image = mask_annotator.annotate(scene=image.copy(), detections=detections)
-        annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
-
-        mask_image = (detections.mask[0] * 255).astype(np.uint8)  # Convert mask to 8-bit grayscale
-        mask_image = cv2.merge([mask_image, mask_image, mask_image, mask_image])  # Convert to 4-channel (RGBA)
+       
+        mask_arrays = [detections.mask[i] for i in range(len(detections.mask))]
+        combined_mask = np.stack(mask_arrays, axis=0)
+        final_mask = np.max(combined_mask, axis=0) 
+        mask_image = (final_mask * 255).astype(np.uint8)
 
         # Ensure image and annotated_image are in the correct format
         image_source = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA) if image.shape[2] == 3 else image.copy()
@@ -131,7 +126,7 @@ for file in os.listdir(input_dir):
 
         # Apply mask to the alpha channel of the original image
         result_image = image_source.copy()
-        result_image[:, :, 3] = mask_image[:, :, 0]  # Set alpha channel
+        result_image[:, :, 3] = mask_image
 
         # Save images
         result_images = [(mask_image, "mask"), (annotated_frame, "annotated_frame"), (result_image, "result")]
