@@ -48,7 +48,7 @@ print("sam done")
 
 #semantic segmentation for all files in images folder
 for file in os.listdir(input_dir):
-    if file.lower().endswith(".jpg"):
+    if file.lower().endswith((".jpg", ".jpeg")):
         CLASSES = ["plants"]
         BOX_THRESHOLD = 0.25
         TEXT_THRESHOLD = 0.25
